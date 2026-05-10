@@ -10,6 +10,15 @@ namespace sc.gamedata
 		private const String GunPathPrefix = "libs/foundry/records/entities/scitem/ships/weapons/";
 		private const String MissilePathPrefix = "libs/foundry/records/entities/scitem/ships/weapons/missiles/";
 
+		// Subfolders under weapons/ that hold extra installable weapon classes
+		// (rocket pods, ship-mounted EMPs). The default filter only walks
+		// direct children of weapons/ to skip turret-platform / mount /
+		// attachment-part records, but these subdirs hold real weapons that
+		// CIG groups separately. New weapon-bearing subfolders need to be
+		// added here explicitly so we don't accidentally pick up
+		// weaponaimableangles/, weapongimbalmodemodifiers/, parts/, or qig/.
+		private static readonly String[] AllowedGunSubfolders = new[] { "rocket_pods/", "emp/" };
+
 		// Returns (guns, missiles). Both lists carry the same WeaponRecord
 		// shape; `kind` distinguishes them and missile-only fields stay null
 		// on guns (and vice versa).
@@ -26,12 +35,27 @@ namespace sc.gamedata
 				var isMissile = path.StartsWith(MissilePathPrefix, StringComparison.OrdinalIgnoreCase);
 				var isGun = !isMissile && path.StartsWith(GunPathPrefix, StringComparison.OrdinalIgnoreCase);
 				if (!isGun && !isMissile) continue;
-				// Subdirectories under weapons/ that aren't `missiles/` may
-				// contain non-weapon entities (turret platforms, mounts).
-				// Filter to direct children of the weapons folder for guns,
-				// and missiles/ direct children for missiles.
+				// Subdirectories under weapons/ may contain non-weapon
+				// entities (turret platforms, mounts, attachment parts).
+				// Direct children of weapons/ are the default; AllowedGunSubfolders
+				// (rocket_pods/, emp/) are the explicit additions for installable
+				// weapon classes CIG groups in subfolders. Missiles/ has its own
+				// prefix and is handled in parallel.
 				var rest = path.Substring(isMissile ? MissilePathPrefix.Length : GunPathPrefix.Length);
-				if (rest.Contains('/')) continue;
+				if (rest.Contains('/'))
+				{
+					if (isMissile) continue; // missiles/ subfolders are not real missiles
+					var allowed = false;
+					foreach (var sub in AllowedGunSubfolders)
+					{
+						if (rest.StartsWith(sub, StringComparison.OrdinalIgnoreCase) && rest.Substring(sub.Length).IndexOf('/') < 0)
+						{
+							allowed = true;
+							break;
+						}
+					}
+					if (!allowed) continue;
+				}
 
 				var root = df.ReadRecordByPathAsXml(path);
 				if (root == null) continue;
@@ -48,6 +72,20 @@ namespace sc.gamedata
 				}
 			}
 			return (guns, missiles);
+		}
+
+		// SWeaponActionFire*Params/launchParams/SProjectileLauncher@pelletCount
+		// holds the projectiles-per-trigger-pull count. Returns null when the
+		// element is absent (treated as 1 by consumers) and skips the value
+		// 1 explicitly so we only carry meaningful (scattergun) counts.
+		private static Int32? ReadPelletCount(XmlElement fireAct)
+		{
+			var launch = XmlNav.FindFirst(fireAct, "launchParams");
+			if (launch == null) return null;
+			var sp = XmlNav.FindFirst(launch, "SProjectileLauncher");
+			if (sp == null) return null;
+			var n = XmlHelpers.AttrInt(sp, "pelletCount", 0);
+			return n > 1 ? n : null;
 		}
 
 		// SAttachableComponentParams/AttachDef carries Size + Localization.Name
@@ -98,18 +136,26 @@ namespace sc.gamedata
 			// Fire rate: SWeaponActionFireSingleParams (or SWeaponActionFireBurstParams)
 			// carries fireRate in RPM and heatPerShot. We sum bursts and grab
 			// the dominant firing action when there are multiple.
+			//
+			// Scatterguns expose pelletCount on the nested SProjectileLauncher;
+			// most weapons fire 1 pellet per shot (default), scatterguns fire 8.
+			// CIG's engine applies the deflection threshold against the volley
+			// total, so battlestations needs the count to score penetration.
 			Double? fireRate = null;
 			Double? heatPerShot = null;
 			Int32? capacity = null;
+			Int32? pelletCount = null;
 			foreach (var fireAct in XmlNav.FindAll(root, "SWeaponActionFireSingleParams"))
 			{
 				fireRate ??= XmlHelpers.AttrDoubleNullable(fireAct, "fireRate");
 				heatPerShot ??= XmlHelpers.AttrDoubleNullable(fireAct, "heatPerShot");
+				pelletCount ??= ReadPelletCount(fireAct);
 			}
 			foreach (var fireAct in XmlNav.FindAll(root, "SWeaponActionFireBurstParams"))
 			{
 				fireRate ??= XmlHelpers.AttrDoubleNullable(fireAct, "fireRate");
 				heatPerShot ??= XmlHelpers.AttrDoubleNullable(fireAct, "heatPerShot");
+				pelletCount ??= ReadPelletCount(fireAct);
 			}
 
 			// Magazine capacity: SAmmoContainerComponentParams.maxAmmoCount
@@ -149,6 +195,11 @@ namespace sc.gamedata
 					timeToOverheat = shotsToOverheat.Value / (fireRate.Value / 60.0);
 			}
 
+			// alpha_damage and dps_burst are reported as PER-PELLET values to
+			// stay backwards-compatible with legacy consumers; battlestations
+			// scales them by pellet_count where the volley total is needed.
+			// Damage profile itself (`damage`) is also per-pellet — scattergun
+			// behavior diverges from non-scatter only via pellet_count > 1.
 			Double? alpha = null;
 			if (ammo.damage is { } d)
 				alpha = d.phys + d.energy + d.dist + d.therm + d.bio + d.stun;
@@ -165,6 +216,10 @@ namespace sc.gamedata
 				size = size,
 				kind = "gun",
 				damage = ammo.damage,
+				// Emit only when >1 to keep the JSON tidy — consumers default
+				// to 1 when the field is absent, so non-scatter weapons stay
+				// untouched and existing #pen= URLs continue to round-trip.
+				pellet_count = (pelletCount is > 1) ? pelletCount : null,
 				rate_of_fire = XmlHelpers.Round(fireRate, 1),
 				projectile_velocity = XmlHelpers.Round(ammo.speed, 1),
 				projectile_lifetime = XmlHelpers.Round(ammo.lifetime, 3),

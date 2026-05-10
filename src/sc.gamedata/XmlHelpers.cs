@@ -172,15 +172,53 @@ namespace sc.gamedata
 		{
 			if (String.IsNullOrEmpty(locKey)) return fallback;
 			var key = locKey.StartsWith('@') ? locKey.Substring(1) : locKey;
-			// Guard against CIG copy-paste bugs: a few armor XMLs reference
-			// an unrelated entity's loc key. If the key doesn't mention the
-			// entity id, fall back to the prettified id so we don't render a
-			// random other ship's name on this row.
-			if (!String.IsNullOrEmpty(entityId) && key.IndexOf(entityId, StringComparison.Ordinal) < 0)
+			// Guard against CIG copy-paste bugs: a few records reference an
+			// unrelated entity's loc key. CIG also routinely re-orders or
+			// renames tokens between an entity id and its loc key (entity
+			// `BEHR_Nova_BallisticGatling_S5` → key
+			// `item_NameBEHR_BallisticGatling_NOVA_S5`), and some entity ids
+			// use placeholder prefixes like `NONE_` while their loc keys
+			// reference the real manufacturer. So a strict substring check
+			// of the full entity id rejects too many valid cases — instead,
+			// require that ANY significant (length ≥ 3, not a pure
+			// size-class designator) entity-id token appears somewhere in the
+			// loc key. Truly unrelated keys (zero shared tokens) still fall
+			// through to the prettified-id fallback.
+			if (!String.IsNullOrEmpty(entityId) && !LocKeyMatchesEntity(key, entityId))
 				return fallback;
 			if (loc.TryGetValue(key, out var value) && !IsPlaceholder(value))
 				return value;
 			return fallback;
+		}
+
+		private static readonly Regex SizeClassRe = new(@"(?:^|_)S(\d+)(?:_|$)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		private static Boolean LocKeyMatchesEntity(String key, String entityId)
+		{
+			// First gate: if both entity id and key have a size-class token
+			// (S1..S10), they must match. Catches CIG copy-paste bugs where an
+			// S8/S9 entity reuses an S7 loc key (BEHR_LaserCannon_S8 →
+			// @item_NameBEHR_LaserCannon_S7) — those would resolve to the
+			// wrong-size weapon's display name otherwise.
+			var entSize = SizeClassRe.Match(entityId);
+			var keySize = SizeClassRe.Match(key);
+			if (entSize.Success && keySize.Success && entSize.Groups[1].Value != keySize.Groups[1].Value)
+				return false;
+
+			// Second gate: at least one significant token (length ≥ 3, not a
+			// size-class designator) from the entity id must appear in the
+			// key. CIG re-orders or renames manufacturer/category tokens
+			// between entity and loc key (entity `BEHR_Nova_BallisticGatling_S5`
+			// → key `item_NameBEHR_BallisticGatling_NOVA_S5`), so we don't
+			// require a contiguous substring match.
+			var keyLower = key.ToLowerInvariant();
+			foreach (var token in entityId.Split('_', StringSplitOptions.RemoveEmptyEntries))
+			{
+				if (token.Length < 3) continue;
+				if (SizeClassRe.IsMatch("_" + token + "_")) continue; // skip S1, S2, …
+				if (keyLower.IndexOf(token.ToLowerInvariant(), StringComparison.Ordinal) >= 0) return true;
+			}
+			return false;
 		}
 
 		private static Boolean IsPlaceholder(String v)
