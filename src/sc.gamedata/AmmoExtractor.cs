@@ -30,24 +30,24 @@ namespace sc.gamedata
 				if (damageInfo == null) continue;
 				var dmg = XmlHelpers.DamageFrom(damageInfo);
 
-				// BasePenetrationDistance lives on BulletProjectileParams.Penetration —
-				// scunpacked exposes it as base_penetration_distance and the
-				// analyzer uses it for armor-pen calculations.
+				// `speed` and `lifetime` are direct attributes on the root
+				// AmmoParams element (NOT children of BulletProjectileParams,
+				// despite the XML's nesting). `range` is derived as speed *
+				// lifetime by WeaponExtractor — same convention scunpacked
+				// uses when shipping the bulk ship-items.json.
+				var speed = XmlHelpers.AttrDoubleNullable(root, "speed");
+				var lifetime = XmlHelpers.AttrDoubleNullable(root, "lifetime");
+
+				// basePenetrationDistance lives on a `penetrationParams`
+				// element under BulletProjectileParams. Lowercase attribute
+				// name on a lowercase element name — earlier code had it
+				// camel-cased and missed every record on this branch.
 				Double? bpd = null;
 				var bullet = XmlNav.FindFirst(root, "BulletProjectileParams");
 				if (bullet != null)
 				{
-					var pen = XmlNav.FindFirst(bullet, "Penetration");
-					if (pen != null) bpd = XmlHelpers.AttrDoubleNullable(pen, "BasePenetrationDistance");
-				}
-
-				// Speed + Lifetime — used to derive `range` for guns.
-				Double? speed = null;
-				Double? lifetime = null;
-				if (bullet != null)
-				{
-					speed = XmlHelpers.AttrDoubleNullable(bullet, "Speed");
-					lifetime = XmlHelpers.AttrDoubleNullable(bullet, "Lifetime");
+					var pen = XmlNav.FindFirst(bullet, "penetrationParams");
+					if (pen != null) bpd = XmlHelpers.AttrDoubleNullable(pen, "basePenetrationDistance");
 				}
 
 				result[guid] = new AmmoEntry

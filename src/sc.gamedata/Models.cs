@@ -38,6 +38,12 @@ namespace sc.gamedata
 		public DamageProfile damage { get; set; } = new();
 
 		// Gun-only enrichment fields (null for missiles).
+		// pellet_count: projectiles per trigger pull. 1 for normal weapons,
+		// >1 for scatterguns. Sourced from
+		// SCItemWeaponComponentParams/fireActions/SWeaponActionFire*Params/launchParams/SProjectileLauncher@pelletCount.
+		// Battlestations multiplies per-pellet damage / DPS by this when
+		// classifying penetration vs deflection threshold.
+		public Int32? pellet_count { get; set; }
 		public Double? rate_of_fire { get; set; }
 		public Double? projectile_velocity { get; set; }
 		public Double? projectile_lifetime { get; set; }
