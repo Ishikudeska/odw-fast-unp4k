@@ -4,7 +4,8 @@ namespace unforge
 {
 	public class DataForgePropertyDefinition : DataForgeTypeReader
     {
-		public String Name { get => this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
+		private String _name;
+		public String Name { get => _name ??= this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
 	
 		public static Int32 RecordSizeInBytes = 12;
 

@@ -1,92 +1,106 @@
-﻿using ICSharpCode.SharpZipLib.Core;
+using ICSharpCode.SharpZipLib.Core;
 using ICSharpCode.SharpZipLib.Zip;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
+using System.Threading.Tasks;
 
 namespace unp4k
 {
 	class Program
 	{
+		private static readonly HttpClient _httpClient = new HttpClient();
+
+		static Program()
+		{
+			_httpClient.DefaultRequestHeaders.TryAddWithoutValidation("client", "unp4k");
+		}
+
 		static void Main(string[] args)
 		{
 			var key = new Byte[] { 0x5E, 0x7A, 0x20, 0x02, 0x30, 0x2E, 0xEB, 0x1A, 0x3B, 0xB6, 0x17, 0xC3, 0x0F, 0xDE, 0x1E, 0x47 };
 
 			if (args.Length == 0) args = new[] { @"Data.p4k" };
-
 			if (args.Length == 1) args = new[] { args[0], "*.*" };
 
-			using (var pakFile = File.OpenRead(args[0]))
+			// Normalize filter once, before touching any entries
+			var filter = args[1];
+			if (filter.StartsWith("*.")) filter = filter.Substring(1);
+
+			var p4kPath = Path.GetFullPath(args[0]);
+
+			// Phase 1: single sequential pass to collect matching entries
+			var matching = new List<(long Index, string Name, string Compression, string Crypto)>();
+			using (var pakFile = File.OpenRead(p4kPath))
 			{
 				var pak = new ZipFile(pakFile) { Key = key };
-				byte[] buf = new byte[4096];
-
 				foreach (ZipEntry entry in pak)
+				{
+					if (filter == ".*" ||
+						filter == "*" ||
+						entry.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+						(filter.EndsWith("xml", StringComparison.InvariantCultureIgnoreCase) && entry.Name.EndsWith(".dcb", StringComparison.InvariantCultureIgnoreCase)))
+					{
+						if (!new FileInfo(entry.Name).Exists)
+							matching.Add((
+								entry.ZipFileIndex,
+								entry.Name,
+								$"{entry.CompressionMethod}",
+								entry.IsAesCrypted ? "Crypt" : "Plain"));
+					}
+				}
+			}
+
+			// Phase 2: parallel extraction; each thread owns its own ZipFile + FileStream
+			Parallel.ForEach(
+				matching,
+				new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+				() => new ZipFile(File.OpenRead(p4kPath)) { Key = key },
+				(info, _, localPak) =>
 				{
 					try
 					{
-						var crypto = entry.IsAesCrypted ? "Crypt" : "Plain";
+						var dir = Path.GetDirectoryName(info.Name);
+						if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
-						if (args[1].StartsWith("*.")) args[1] = args[1].Substring(1);                                                                                           // Enable *.ext format for extensions
+						Console.WriteLine($"{info.Compression} | {info.Crypto} | {info.Name}");
 
-						if (args[1] == ".*" ||                                                                                                                                  // Searching for everything
-							args[1] == "*" ||                                                                                                                                   // Searching for everything
-							entry.Name.ToLowerInvariant().Contains(args[1].ToLowerInvariant()) ||                                                                               // Searching for keywords / extensions
-							(args[1].EndsWith("xml", StringComparison.InvariantCultureIgnoreCase) && entry.Name.EndsWith(".dcb", StringComparison.InvariantCultureIgnoreCase))) // Searching for XMLs - include game.dcb
+						using (var s = localPak.GetInputStream(info.Index))
+						using (var fs = File.Create(info.Name))
 						{
-							var target = new FileInfo(entry.Name);
-
-							if (!target.Directory.Exists) target.Directory.Create();
-
-							if (!target.Exists)
-							{
-								Console.WriteLine($"{entry.CompressionMethod} | {crypto} | {entry.Name}");
-
-								using (Stream s = pak.GetInputStream(entry))
-								{
-									using (FileStream fs = File.Create(entry.Name))
-									{
-										StreamUtils.Copy(s, fs, buf);
-									}
-								}
-
-								// target.Delete();
-							}
+							StreamUtils.Copy(s, fs, new byte[81920]);
 						}
 					}
 					catch (Exception ex)
 					{
-						Console.WriteLine($"Exception while extracting {entry.Name}: {ex.Message}");
+						Console.WriteLine($"Exception while extracting {info.Name}: {ex.Message}");
+						ReportError(info.Name, ex);
+					}
+					return localPak;
+				},
+				localPak => ((IDisposable)localPak).Dispose()
+			);
+		}
 
-						try
-						{
-							using (var client = new HttpClient { })
-							{
-								// var server = "http://herald.holoxplor.local";
-								var server = "https://herald.holoxplor.space";
-
-								client.DefaultRequestHeaders.Add("client", "unp4k");
-
-								using (var content = new MultipartFormDataContent("UPLOAD----"))
-								{
-									content.Add(new StringContent($"{ex.Message}\r\n\r\n{ex.StackTrace}"), "exception", entry.Name);
-
-									using (var errorReport = client.PostAsync($"{server}/p4k/exception/{entry.Name}", content).Result)
-									{
-										if (errorReport.StatusCode == System.Net.HttpStatusCode.OK)
-										{
-											Console.WriteLine("This exception has been reported.");
-										}
-									}
-								}
-							}
-						}
-						catch (Exception)
-						{
-							Console.WriteLine("There was a problem whilst attempting to report this error.");
-						}
+		private static void ReportError(string entryName, Exception ex)
+		{
+			try
+			{
+				var server = "https://herald.holoxplor.space";
+				using (var content = new MultipartFormDataContent("UPLOAD----"))
+				{
+					content.Add(new StringContent($"{ex.Message}\r\n\r\n{ex.StackTrace}"), "exception", entryName);
+					using (var response = _httpClient.PostAsync($"{server}/p4k/exception/{entryName}", content).Result)
+					{
+						if (response.StatusCode == System.Net.HttpStatusCode.OK)
+							Console.WriteLine("This exception has been reported.");
 					}
 				}
+			}
+			catch (Exception)
+			{
+				Console.WriteLine("There was a problem whilst attempting to report this error.");
 			}
 		}
 	}

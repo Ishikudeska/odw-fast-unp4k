@@ -88,29 +88,14 @@ namespace Dolkens.Framework.BinaryExtensions
         /// <returns></returns>
         public static String ReadCString(this BinaryReader binaryReader)
         {
-            Int32 stringLength = 0;
-
-            while (binaryReader.BaseStream.Position < binaryReader.BaseStream.Length && binaryReader.ReadChar() != 0)
-                stringLength++;
-
-            Int64 nul = binaryReader.BaseStream.Position;
-
-            binaryReader.BaseStream.Seek(0 - stringLength - 1, SeekOrigin.Current);
-
-            Char[] chars = binaryReader.ReadChars(stringLength + 1);
-
-            binaryReader.BaseStream.Seek(nul, SeekOrigin.Begin);
-
-			// Why is this necessary?
-			if (stringLength > chars.Length) stringLength = chars.Length;
-
-            // If there is actually a string to read
-            if (stringLength > 0)
+            var sb = new System.Text.StringBuilder();
+            while (binaryReader.BaseStream.Position < binaryReader.BaseStream.Length)
             {
-                return new String(chars, 0, stringLength).Replace("\u0000", "");
+                var b = binaryReader.ReadByte();
+                if (b == 0) break;
+                sb.Append((char)b);
             }
-
-            return null;
+            return sb.Length > 0 ? sb.ToString() : null;
         }
 
         /// <summary>
@@ -171,7 +156,7 @@ namespace Dolkens.Framework.BinaryExtensions
 
 		#region Xml Extensions
 
-		private static Regex cleanString = new Regex("[^a-zA-Z0-9.]");
+		private static Regex cleanString = new Regex("[^a-zA-Z0-9.]", RegexOptions.Compiled);
 
 		public static XmlElement CreateElementWithValue(this XmlNode xmlNode, Object name, Object value)
 		{
