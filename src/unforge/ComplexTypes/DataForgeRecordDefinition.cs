@@ -7,9 +7,12 @@ namespace unforge
 {
 	public class DataForgeRecordDefinition : DataForgeTypeReader
 	{
-		public String Name { get => this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
-		public String FileName { get => this.StreamReader.ReadTextAtOffset(this.FileNameOffset); }
-		public String DevTeamName { get => this.StreamReader.ReadBlobAtOffset(this.DevTeamNameOffset); }
+		private String _name;
+		public String Name { get => _name ??= this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
+		private String _fileName;
+		public String FileName { get => _fileName ??= this.StreamReader.ReadTextAtOffset(this.FileNameOffset); }
+		private String _devTeamName;
+		public String DevTeamName { get => _devTeamName ??= this.StreamReader.ReadBlobAtOffset(this.DevTeamNameOffset); }
 		public DataForgeStructDefinition StructDefinition { get => this.StreamReader.ReadStructDefinitionAtIndex(this.StructIndex); }
 
 

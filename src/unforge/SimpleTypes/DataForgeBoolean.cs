@@ -17,7 +17,7 @@ namespace unforge
 
 		public override String ToString()
         {
-            return String.Format("{0}", this.Value ? "1" : "0");
+            return this.Value ? "1" : "0";
         }
     }
 }

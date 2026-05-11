@@ -4,8 +4,8 @@ namespace unforge
 {
 	public class DataForgeDataMapping : DataForgeTypeReader
     {
-		public UInt32 NameOffset { get => this.StreamReader.ReadStructDefinitionAtIndex(this.StructIndex).NameOffset; }
-		public String Name { get => this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
+		private String _name;
+		public String Name { get => _name ??= this.StreamReader.ReadBlobAtOffset(this.StreamReader.ReadStructDefinitionAtIndex(this.StructIndex).NameOffset); }
 
 		public static Int32 RecordSizeInBytes = 4;
 		public static Int32 RecordSizeInBytesV6 = 8;

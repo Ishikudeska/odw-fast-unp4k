@@ -11,7 +11,8 @@ namespace unforge
 		public static Int32 RecordSizeInBytes = 16;
 
 		public UInt32 NameOffset { get; }
-		public String Name { get => this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
+		private String _name;
+		public String Name { get => _name ??= this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
 
         public UInt32 ParentTypeIndex { get; }
 
@@ -44,29 +45,31 @@ namespace unforge
 			this.RecordSize = reader.ReadUInt32();
 		}
 
-		public IEnumerable<DataForgeStructDefinition> Hierarchy
+		private DataForgeStructDefinition[] _hierarchy;
+		public DataForgeStructDefinition[] Hierarchy
 		{
 			get
 			{
+				if (_hierarchy != null) return _hierarchy;
+				var list = new List<DataForgeStructDefinition>();
 				if (this.ParentTypeIndex != 0xFFFFFFFF)
-					foreach (var parent in this.ParentType.Hierarchy)
-						yield return parent;
-
-				yield return this;
+					list.AddRange(this.ParentType.Hierarchy);
+				list.Add(this);
+				return _hierarchy = list.ToArray();
 			}
 		}
 
-		public IEnumerable<DataForgePropertyDefinition> PropertyDefinitions
+		private DataForgePropertyDefinition[] _propertyDefinitions;
+		public DataForgePropertyDefinition[] PropertyDefinitions
 		{
 			get
 			{
-				foreach (var dataStruct in this.Hierarchy)
-				{
-					for (var propertyIndex = dataStruct.FirstPropertyIndex; propertyIndex < dataStruct.FirstPropertyIndex + dataStruct.PropertyCount; propertyIndex++)
-					{
-						yield return this.StreamReader.ReadPropertyDefinitionAtIndex(propertyIndex);
-					}
-				}
+				if (_propertyDefinitions != null) return _propertyDefinitions;
+				var result = new List<DataForgePropertyDefinition>();
+				foreach (var s in this.Hierarchy)
+					for (var i = s.FirstPropertyIndex; i < s.FirstPropertyIndex + s.PropertyCount; i++)
+						result.Add(this.StreamReader.ReadPropertyDefinitionAtIndex(i));
+				return _propertyDefinitions = result.ToArray();
 			}
 		}
 
@@ -80,9 +83,10 @@ namespace unforge
 				else
 				{
 					var xmlNode = parentNode.OwnerDocument.CreateElement(propertyDefinition.Name);
-					
-					foreach (var childNode in this.ReadArrayAsXml(xmlNode, propertyDefinition).Where(x => x != null))
+
+					foreach (var childNode in this.ReadArrayAsXml(xmlNode, propertyDefinition))
 					{
+								if (childNode == null) continue;
 						xmlNode.AppendChild(childNode);
 					}
 
@@ -107,8 +111,9 @@ namespace unforge
 
 							var xmlNode = parentNode.OwnerDocument.CreateElement(nameOverride ?? propertyDefinition.Name);
 
-							foreach (var childNode in dataStruct.ReadAsXml(xmlNode).Where(x => x != null))
+							foreach (var childNode in dataStruct.ReadAsXml(xmlNode))
 							{
+								if (childNode == null) continue;
 								if (childNode is XmlAttribute attribute) xmlNode.Attributes.Append(attribute);
 								else if (childNode is XmlElement element) xmlNode.AppendChild(element);
 							}

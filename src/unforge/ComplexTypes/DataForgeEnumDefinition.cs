@@ -8,7 +8,8 @@ namespace unforge
 		public static Int32 RecordSizeInBytes = 8;
 
 		public UInt32 NameOffset { get; set; }
-        public String Name { get => this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
+		private String _name;
+        public String Name { get => _name ??= this.StreamReader.ReadBlobAtOffset(this.NameOffset); }
         public UInt16 ValueCount { get; set; }
         public UInt16 FirstValueIndex { get; set; }
 

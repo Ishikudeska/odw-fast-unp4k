@@ -8,6 +8,8 @@ using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Xml;
 
 namespace unforge
@@ -89,7 +91,21 @@ namespace unforge
 		public Int64 BlobOffset { get => this.TextOffset + this.TextLength; }
 		public Int64 DataOffset { get => this.BlobOffset + this.BlobLength; }
 
-		public DataForge(Stream stream) : base(stream)
+		// Copy any stream to a MemoryStream so all data section seeks and reads
+		// are pure in-memory operations — eliminating kernel I/O inside the lock
+		// in ReadRecordByPathAsXml and also fixing a latent UAF in unp4k.fs where
+		// the caller-owned MemoryStream could be disposed before lazy reads fired.
+		private static MemoryStream WrapInMemoryStream(Stream stream)
+		{
+			if (stream.CanSeek) stream.Seek(0, SeekOrigin.Begin);
+			var capacity = stream.CanSeek && stream.Length <= Int32.MaxValue ? (Int32)stream.Length : 0;
+			var ms = capacity > 0 ? new MemoryStream(capacity) : new MemoryStream();
+			stream.CopyTo(ms);
+			ms.Seek(0, SeekOrigin.Begin);
+			return ms;
+		}
+
+		public DataForge(Stream stream) : base(WrapInMemoryStream(stream))
 		{
 			this.BaseStream.Seek(0, SeekOrigin.Begin);
 
@@ -167,7 +183,8 @@ namespace unforge
 				lastOffset += (Int32)(dataMapping.StructCount * dataStruct.RecordSize);
 			}
 
-			Debug.Assert((this.DataOffset + lastOffset) == this.BaseStream.Length, "Data / Stream length mismatch");
+			this._cachedDataOffset = this.DataOffset;
+			Debug.Assert((this._cachedDataOffset + lastOffset) == this.BaseStream.Length, "Data / Stream length mismatch");
 		}
 
 		/// <summary>
@@ -184,6 +201,8 @@ namespace unforge
 		/// Converts StructIndex and VariantIndex to dataOffsets
 		/// </summary>
 		public Dictionary<UInt32, Int64> StructToDataOffsetMap { get; }
+
+		private Int64 _cachedDataOffset;
 
 		// Pre-loaded string tables — read once at ctor time so per-record
 		// string lookups become byte-buffer scans instead of stream seeks.
@@ -385,7 +404,7 @@ namespace unforge
 
 		internal DataForgeRecordDefinition ReadRecordDefinitionAtIndex(Int64 index) => this._recordDefinitions[index];
 
-		public List<(UInt32, UInt32)> StructStack { get; set; } = new List<(UInt32, UInt32)> { };
+		public HashSet<(UInt32, UInt32)> StructStack { get; set; } = new HashSet<(UInt32, UInt32)>();
 
 		public XmlElement ReadStructAtIndexAsXml(XmlElement xmlNode, UInt32 structIndex, UInt32 variantIndex)
 		{
@@ -404,7 +423,7 @@ namespace unforge
 
 				if (this.StructToDataOffsetMap.TryGetValue(structIndex, out long value))
 				{
-					this.Position = this.DataOffset + value + (dataStruct.RecordSize * variantIndex);
+					this.Position = this._cachedDataOffset + value + (dataStruct.RecordSize * variantIndex);
 				}
 				else
 				{
@@ -426,8 +445,9 @@ namespace unforge
 		{
 			var i = 0;
 
-			foreach (var childNode in dataStruct.ReadAsXml(xmlNode).Where(x => x != null))
+			foreach (var childNode in dataStruct.ReadAsXml(xmlNode))
 			{
+				if (childNode == null) continue;
 				if (childNode is XmlAttribute attribute) xmlNode.Attributes.Append(attribute);
 				else if (childNode is XmlElement element) xmlNode.AppendChild(element);
 
@@ -502,7 +522,7 @@ namespace unforge
 			return this.ReadRecordAtIndexAsXml(xmlNode, recordIndex);
 		}
 
-		public List<Int32> RecordStack { get; set; } = new List<Int32> { };
+		public HashSet<Int32> RecordStack { get; set; } = new HashSet<Int32>();
 
 		public XmlElement ReadRecordAtIndexAsXml(XmlNode xmlNode, Int32 recordIndex)
 		{
@@ -577,46 +597,41 @@ namespace unforge
 		public void Save(String filename)
 		{
 			var totalSw = Stopwatch.StartNew();
-			var readSw = new Stopwatch();
-			var writeSw = new Stopwatch();
+			var baseDir = Path.GetDirectoryName(Path.GetFullPath(filename)) ?? ".";
 			var written = 0;
 			var skipped = 0;
 			Int64 bytesWritten = 0;
 
-			foreach (var fileReference in this.PathToRecordMap.Keys)
-			{
-				readSw.Start();
-				var node = this.ReadRecordByPathAsXml(fileReference);
-				readSw.Stop();
-
-				if (node == null) { skipped++; continue; }
-
-				var newPath = Path.Combine(Path.GetDirectoryName(filename), fileReference);
-
-				if (!Directory.Exists(Path.GetDirectoryName(newPath))) Directory.CreateDirectory(Path.GetDirectoryName(newPath));
-
-
-				writeSw.Start();
-				using (var fileStream = File.OpenWrite(newPath))
-				using (var writer = XmlWriter.Create(fileStream, _xmlSettings))
+			// Reads are serialized by the lock inside ReadRecordByPathAsXml;
+			// writes are independent so they run in parallel across all cores.
+			Parallel.ForEach(
+				this.PathToRecordMap.Keys,
+				new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+				fileReference =>
 				{
-					node.WriteTo(writer);
-					writer.Flush();
-					bytesWritten += fileStream.Length;
+					var node = this.ReadRecordByPathAsXml(fileReference);
+					if (node == null) { Interlocked.Increment(ref skipped); return; }
+
+					var newPath = Path.Combine(baseDir, fileReference);
+					var dir = Path.GetDirectoryName(newPath);
+					if (!String.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+					using (var fileStream = File.Create(newPath))
+					using (var writer = XmlWriter.Create(fileStream, _xmlSettings))
+					{
+						node.WriteTo(writer);
+						writer.Flush();
+						Interlocked.Add(ref bytesWritten, fileStream.Length);
+					}
+					Interlocked.Increment(ref written);
 				}
-				writeSw.Stop();
-				written++;
-			}
+			);
 
 			totalSw.Stop();
 
-			var perRecRead = written > 0 ? readSw.Elapsed.TotalMilliseconds / written : 0;
-			var perRecWrite = written > 0 ? writeSw.Elapsed.TotalMilliseconds / written : 0;
 			Console.WriteLine();
 			Console.WriteLine("=== unforge Save() timing ===");
 			Console.WriteLine($"  records:    {written} written, {skipped} skipped (null)");
-			Console.WriteLine($"  read+build: {readSw.Elapsed.TotalSeconds,8:F2}s  ({perRecRead:F2} ms/rec)");
-			Console.WriteLine($"  xml write:  {writeSw.Elapsed.TotalSeconds,8:F2}s  ({perRecWrite:F2} ms/rec)");
 			Console.WriteLine($"  output:     {bytesWritten / 1_048_576.0,8:F1} MB");
 			Console.WriteLine($"  total:      {totalSw.Elapsed.TotalSeconds,8:F2}s");
 		}
